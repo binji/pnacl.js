@@ -32,12 +32,14 @@ function BitStream(data) {
 
 BitStream.prototype._readFracBits = function(numBits) {
   var result;
-  // Special case 32-bits becaues 1 << 32 == 0 in JavaScript.
-  if (numBits == 32)
+  // Special case 32-bits because any shift >= 32 bits is ignored in JavaScript.
+  if (numBits === 32) {
     result = this.curword;
-  else
+    this.curword = 0;
+  } else {
     result = this.curword & ((1 << numBits) - 1);
-  this.curword >>= numBits;
+    this.curword >>= numBits;
+  }
   this.curwordBits -= numBits;
   this.bitOffset += numBits;
   return result;
@@ -45,6 +47,11 @@ BitStream.prototype._readFracBits = function(numBits) {
 
 BitStream.prototype._fillCurWord = function() {
   var byteOffset = this.bitOffset >> 3;
+  if (byteOffset >= this.byteLength) {
+    var msg = '_fillCurWord: out of range. byteOffset =' +
+        byteOffset + ' max =' + this.byteLength;
+    throw new Error(msg);
+  }
   var u32offset = byteOffset >> 2;
   this.curword = this.dataView[u32offset];
   if (byteOffset + 4 < this.byteLength)
@@ -69,7 +76,7 @@ BitStream.prototype.read = function(numBits) {
 BitStream.prototype.readVbr = function(numBits) {
   var piece = this.read(numBits);
   var hiMask = 1 << (numBits - 1);
-  if ((piece & hiMask) == 0)
+  if ((piece & hiMask) === 0)
     return piece;
 
   var loMask = hiMask - 1;
@@ -77,7 +84,7 @@ BitStream.prototype.readVbr = function(numBits) {
   var shift = 0;
   while (1) {
     result |= (piece & loMask) << shift;
-    if ((piece & hiMask) == 0)
+    if ((piece & hiMask) === 0)
       return result;
     shift += numBits - 1;
     piece = this.read(numBits);
@@ -97,6 +104,12 @@ BitStream.prototype.tellBit = function() {
 
 BitStream.prototype.seekBit = function(offset) {
   this.bitOffset = offset & ~31;
+  if (offset === this.byteLength << 3) {
+    // Seeking to the end of the array is fine, but don't try to fill the
+    // current word.
+    this.curWordBits = 0;
+    return;
+  }
   this._fillCurWord();
 
   // offset is not aligned, read the unaligned bits.
@@ -111,7 +124,7 @@ BitStream.prototype.align32 = function() {
 
 BitStream.prototype.atEnd = function() {
   var byteOffset = this.bitOffset >> 3;
-  return byteOffset == this.byteLength;
+  return byteOffset === this.byteLength;
 };
 
 
@@ -124,15 +137,15 @@ function HeaderField() {
 HeaderField.prototype.read = function(bs) {
   this.ftype = bs.read(4);
   this.id = bs.read(4);
-  if (this.id != 1)
+  if (this.id !== 1)
     throw new Error('Bad header id ' + this.id);
 
   bs.read(8);  // Align to u16.
   var length = bs.read(16);
 
-  if (this.ftype == 0)
+  if (this.ftype === 0)
     this.data = bs.readBytes(length);
-  else if (this.ftype == 1)
+  else if (this.ftype === 1)
     this.data = bs.read(32);
   else
     throw new Error('Bad ftype ' + this.ftype);
@@ -147,7 +160,7 @@ function Header() {
 
 Header.prototype.read = function(bs) {
   var match = function(c) {
-    if (bs.read(8) != c.charCodeAt(0))
+    if (bs.read(8) !== c.charCodeAt(0))
       throw new Error('Bad signature');
   };
   match('P');
@@ -202,8 +215,8 @@ AbbrevOp.prototype.readAbbrev = function(bs) {
   throw new Error('Function not implemented');
 };
 
-function LiteralAbbrevOp() {
-  this.value = null;
+function LiteralAbbrevOp(value) {
+  this.value = value ? value : null;
 }
 
 LiteralAbbrevOp.prototype = new AbbrevOp();
@@ -216,8 +229,8 @@ LiteralAbbrevOp.prototype.readAbbrev = function(bs) {
   return [this.value];
 };
 
-function FixedAbbrevOp() {
-  this.numBits = 0;
+function FixedAbbrevOp(numBits) {
+  this.numBits = numBits ? numBits : 0;
 }
 
 FixedAbbrevOp.prototype = new AbbrevOp();
@@ -230,8 +243,8 @@ FixedAbbrevOp.prototype.readAbbrev = function(bs) {
   return [bs.read(this.numBits)];
 };
 
-function VbrAbbrevOp() {
-  this.numBits = 0;
+function VbrAbbrevOp(numBits) {
+  this.numBits = numBits ? numBits : 0;
 }
 
 VbrAbbrevOp.prototype = new AbbrevOp();
@@ -244,8 +257,10 @@ VbrAbbrevOp.prototype.readAbbrev = function(bs) {
   return [bs.readVbr(this.numBits)];
 };
 
-function ArrayAbbrevOp() {
-  this.eltOp = null;
+function ArrayAbbrevOp(eltOp) {
+  if (eltOp && !(eltOp instanceof AbbrevOp))
+    throw new Error('Expected eltOp to be instance of AbbrevOp');
+  this.eltOp = eltOp ? eltOp : null;
 }
 
 ArrayAbbrevOp.prototype = new AbbrevOp();
@@ -305,5 +320,153 @@ Abbrev.prototype.read = function(bs) {
       i += 2;
     else
       i += 1;
+  }
+};
+
+
+var BLOCKINFO_CODE_SETBID = 1
+var BLOCKINFO_CODE_BLOCKNAME = 2
+var BLOCKINFO_CODE_SETRECORDNAME = 3
+
+function BlockInfoContext() {
+  this.curBlockId = null;
+  this.blockAbbrevs = {};
+  this.blockNames = {};
+  this.blockRecordNames = {};
+}
+
+BlockInfoContext.prototype.parseRecord = function(record) {
+  switch (record.code) {
+    case BLOCKINFO_CODE_SETBID:
+      this.curBlockId = record.values[0];
+      this.blockAbbrevs[this.curBlockId] = [];
+      this.blockRecordNames[this.curBlockId] = [];
+      break;
+    case BLOCKINFO_CODE_BLOCKNAME:
+      var name = record.values.map(String.fromCharCode).join('');
+      this.blockNames[this.curBlockId] = name;
+      break;
+    case BLOCKINFO_CODE_SETRECORDNAME:
+      var id = record.values[0];
+      var name = record.values.slice(1).map(String.fromCharCode).join('');
+
+      var array = this.blockRecordNames[this.curBlockId];
+      if (array === undefined)
+        this.blockRecordNames[this.curBlockId] = array = [];
+
+      array.push([id, name]);
+      break;
+  }
+};
+
+BlockInfoContext.prototype.pushAbbrev = function(abbrev) {
+  if (this.curBlockId === null)
+    throw new Error('pushAbbrev: No block id set by SETBID');
+
+  var array = this.blockAbbrevs[this.curBlockId];
+  if (array === undefined)
+    this.blockAbbrevs[this.curBlockId] = array = [];
+
+  array.push(abbrev);
+};
+
+BlockInfoContext.prototype.getBlockAbbrevs = function(blockId) {
+  var abbrevs = this.blockAbbrevs[blockId];
+  return abbrevs ? abbrevs.slice() : [];
+};
+
+
+var ENTRY_END_BLOCK = 0
+var ENTRY_SUBBLOCK = 1
+var ENTRY_DEFINE_ABBREV = 2
+var ENTRY_UNABBREV_RECORD = 3
+
+function Record() {
+  this.code = null;
+  this.values = [];
+}
+
+Record.prototype.read = function(bs, abbrevId, abbrevs) {
+  if (abbrevId === ENTRY_UNABBREV_RECORD) {
+    this.code = bs.readVbr(6);
+    var numElts = bs.readVbr(6);
+    for (var i = 0; i < numElts; ++i)
+      this.values.push(bs.readVbr(6));
+  } else {
+    var self = this;
+    var abbrev = abbrevs[abbrevId - 4];  // -4 to skip abbrev defaults.
+    if (abbrev === undefined)
+      throw new Error('Invalid abbrev: ' + abbrevId);
+    abbrev.ops.forEach(function(op) {
+      op.readAbbrev(bs).forEach(function(value) {
+        self.values.push(value);
+      });
+    });
+    this.code = this.values[0];
+    this.values = this.values.slice(1);
+  }
+};
+
+
+function Block() {
+  this.id = null;
+  this.chunks = [];
+}
+
+Block.prototype.read = function(bs, context) {
+  this.id = bs.readVbr(8);
+  var codelen = bs.readVbr(4);
+  bs.align32();
+  var numWords = bs.read(32);
+
+  // Add abbreviations for this block id.
+  var abbrevs = context.getBlockAbbrevs(this.id);
+
+  // The "block info" block is special. It has id 0, and any abbreviations
+  // defined apply to its current block id, which is specified with a
+  // unabbreviated record. See BlockInfoContext above for more info.
+  var isBlockInfo = this.id === 0;
+
+  while (!bs.atEnd()) {
+    var entry = bs.read(codelen);
+    if (entry === ENTRY_END_BLOCK) {
+      bs.align32();
+      return;
+    } else if (entry === ENTRY_SUBBLOCK) {
+      var block = new Block();
+      block.read(bs, context);
+      this.chunks.push(block);
+    } else if (entry === ENTRY_DEFINE_ABBREV) {
+      var abbrev = new Abbrev();
+      abbrev.read(bs);
+      abbrevs.push(abbrev);
+      if (isBlockInfo)
+        context.pushAbbrev(abbrev);
+    } else {
+      // Abbrev or UNABBREV_RECORD
+      var record = new Record();
+      record.read(bs, entry, abbrevs);
+      this.chunks.push(record);
+      if (isBlockInfo)
+        context.parseRecord(record);
+    }
+  }
+};
+
+function Bitcode() {
+  this.header = new Header();
+  this.blocks = [];
+}
+
+Bitcode.prototype.read = function(bs) {
+  var context = new BlockInfoContext();
+  this.header.read(bs);
+  while (!bs.atEnd()) {
+    var entry = bs.read(2);
+    if (entry != ENTRY_SUBBLOCK)
+      throw new Error('Expected subblock at top-level, not ' + entry);
+    var block = new Block();
+    block.read(bs, context);
+    this.blocks.push(block);
   }
 };

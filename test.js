@@ -123,6 +123,16 @@ test('multi-byte unaligned read', function() {
   ok(bs.atEnd());
 });
 
+test('fill word regression', function() {
+  var data = '';
+  data += '00100000000000000000000000000000';  // 32-bits, value = 4
+  data += '1100';
+  var bs = BSbits(data);
+
+  equal(bs.read(32), 4);
+  equal(bs.read(4), 3);
+});
+
 test('read vbr', function() {
   // VBR is a variable bit read function. If the top bit is set of a given
   // chunk, then continue reading more chunks. Finally, strip the top bit of
@@ -150,6 +160,14 @@ test('seek bit', function() {
   bs.seekBit(0);
   equal(bs.read(4), bin('1110'));
   ok(!bs.atEnd());
+});
+
+test('seek bit - fail', function() {
+  var bs = BSbits('00000000000000000000000000000000');
+
+  throws(function() { bs.seekBit(33); }, Error);
+  bs.seekBit(32);  // Should be OK.
+  throws(function() { bs.read(1); }, Error);
 });
 
 test('align32', function() {
@@ -224,7 +242,7 @@ test('literal abbrev op', function() {
   op.read(bs1);  // Literal value is 16.
   // Always return 16, regardless of bitstream.
   var dummyBs = BS([]);
-  deepEqual(op.readAbbrev(dummyBs), [16]);  
+  deepEqual(op.readAbbrev(dummyBs), [16]);
   deepEqual(op.readAbbrev(dummyBs), [16]);
 });
 
@@ -287,7 +305,258 @@ test('blob abbrev op', function() {
   var op = new BlobAbbrevOp();
   // The first 6 bits are the number of bytes to read. The data follows after a
   // 32-bit alignment (the zero bits in parentheses below).
-  var bs = BSbits(
-      '110000 (00 00000000 00000000 00000000) 01010100 11001100 11100010');
+  var data = '';
+  data += '110000';  // <num bytes>
+  data += '(00000000000000000000000000)';  // align32
+  data += '01010100 11001100 11100010';  // <values 42, 51, 71>
+  data += '(00000000)';  // align32
+  var bs = BSbits(data);
   deepEqual(op.readAbbrev(bs), [42, 51, 71]);
+});
+
+test('read abbrev op - literal', function() {
+  // low bit set = literal, followed by 8 bits of literal value.
+  var bs = BSbits('1 10101010');
+  var op = readAbbrevOp(bs);
+  ok(op instanceof LiteralAbbrevOp);
+  var dummyBs = BS([]);
+  deepEqual(op.readAbbrev(dummyBs), [85]);
+});
+
+test('read abbrev op - fixed', function() {
+  // 0100 = fixed, followed by 5 bits for the fixed bit length.
+  var bs1 = BSbits('0100 11000');
+  var op = readAbbrevOp(bs1);
+  ok(op instanceof FixedAbbrevOp);
+  var bs2 = BSbits('111');
+  deepEqual(op.readAbbrev(bs2), [7]);
+});
+
+test('read abbrev op - vbr', function() {
+  // 0010 = vbr, followed by 5 bits for the variable bit length.
+  var bs1 = BSbits('0010 11000');
+  var op = readAbbrevOp(bs1);
+  ok(op instanceof VbrAbbrevOp);
+  var bs2 = BSbits('111 100');
+  deepEqual(op.readAbbrev(bs2), [7]);
+});
+
+test('read abbrev op - array', function() {
+  // 0110 = array, followed by the element type. In this case, the element type
+  // is fixed with length of 3 bits.
+  var bs1 = BSbits('0110 0100 11000');
+  var op = readAbbrevOp(bs1);
+  ok(op instanceof ArrayAbbrevOp);
+  // The first 6 bits are the number of elements, followed by the data for the
+  // array.
+  var bs2 = BSbits('101000 110 100 001 100 101');
+  deepEqual(op.readAbbrev(bs2), [3, 1, 4, 1, 5]);
+});
+
+test('read abbrev op - char6', function() {
+  // 0001 = char6, there is no additional data needed.
+  var bs = BSbits('0001');
+  var op = readAbbrevOp(bs);
+  ok(op instanceof Char6AbbrevOp);
+});
+
+test('read abbrev op - blob', function() {
+  // 0101 = blob.
+  var bs = BSbits('0101');
+  var op = readAbbrevOp(bs);
+  ok(op instanceof BlobAbbrevOp);
+});
+
+test('read abbrev op - fail', function() {
+  // 0000, 0011, and 0111 = invalid.
+  throws(function() { readAbbrevOp(BSbits('0000')); }, Error);
+  throws(function() { readAbbrevOp(BSbits('0011')); }, Error);
+  throws(function() { readAbbrevOp(BSbits('0111')); }, Error);
+});
+
+module('Record');
+test('unabbrev', function() {
+  var data = '';
+  data += '011010 010000';  // <code = 22>, <num values = 2>
+  data += '010100 001010';  // <values = 10, 20>
+  var bs = BSbits(data);
+
+  var record = new Record();
+  var abbrevId = 3;  // UNABBREV_RECORD
+  var abbrevs = [];  // not needed
+  record.read(bs, abbrevId, abbrevs);
+
+  equal(record.code, 22);
+  equal(record.values.length, 2);
+  equal(record.values[0], 10);
+  equal(record.values[1], 20);
+});
+
+test('abbrev', function() {
+  var data = '010000 01010 00101';  // <num elts = 2>, <values = 10, 20>
+  var bs = BSbits(data);
+  var record = new Record();
+  var abbrev = new Abbrev();
+  var abbrevId = 4;  // 4 is the first user-defined abbrev id.
+  abbrev.ops = [
+    new LiteralAbbrevOp(22),
+    new ArrayAbbrevOp(new FixedAbbrevOp(5))
+  ];
+  var abbrevs = [abbrev];
+  record.read(bs, abbrevId, [abbrev]);
+
+  equal(record.code, 22);
+  equal(record.values.length, 2);
+  equal(record.values[0], 10);
+  equal(record.values[1], 20);
+});
+
+module('Block');
+test('simple', function() {
+  var data = '';
+  data += '10000000 0100';  // <block id = 1>, <code length = 2>
+  data += '(00000000000000000000)';  // align32
+  data += '11000000000000000000000000000000';  // <num words = 3>
+  // UNABBREV_RECORD, <code = 0>, <num values = 1>, <value = 42>
+  data += '11 000000 100000 010101|100000';
+  data += '00 (0000)';  // END_BLOCK, align32
+  var bs = BSbits(data);
+  var block = new Block();
+  var context = new BlockInfoContext();
+  block.read(bs, context);
+
+  equal(block.id, 1, 'block.id');
+  equal(block.chunks.length, 1, 'block.chunks.length');
+  var chunk = block.chunks[0];
+  ok(chunk instanceof Record, 'chunk is Record');
+  equal(chunk.code, 0, 'chunk.code');
+  equal(chunk.values.length, 1, 'chunk.values.length');
+  equal(chunk.values[0], 42);
+});
+
+test('subblock', function() {
+  var data = '';
+  // root block
+  data += '10000000 0100';  // <block id = 1>, <code length = 2>
+  data += '(00000000000000000000)';  // align32
+  data += '00000000000000000000000000000000';  // <num words>
+
+  // subblock
+  data += '10';  // SUBBLOCK
+  data += '01000000 0100';  // <block id = 2>, <code length = 2>
+  data += '(000000000000000000)';  // align32
+  data += '11000000000000000000000000000000';  // <num words = 4>
+  // UNABBREV_RECORD, <code = 0>, <num values = 1>, <value = 42>
+  data += '11 000000 100000 010101|100000';
+  data += '00 (0000)';  // END_BLOCK, align32
+  // end subblock
+
+  // UNABBREV_RECORD, <code = 1>, <num values = 2>, <values = 3, 4>
+  data += '11 100000 010000 110000 001000';
+  data += '00 (0000)';  // END_BLOCK, align32
+
+  var bs = BSbits(data);
+  var block = new Block();
+  var context = new BlockInfoContext();
+  block.read(bs, context);
+
+  equal(block.id, 1, 'block.id');
+  equal(block.chunks.length, 2, 'block.chunks.length');
+
+  var subblock = block.chunks[0];
+  ok(subblock instanceof Block, 'chunk #1 is Block');
+  equal(subblock.id, 2, 'subblock.id');
+  equal(subblock.chunks.length, 1, 'subblock.chunks.length');
+
+  ok(subblock.chunks[0] instanceof Record, 'subblock chunk is Record');
+  equal(subblock.chunks[0].values.length, 1);
+  equal(subblock.chunks[0].values[0], 42);
+
+  var record = block.chunks[1];
+  ok(record instanceof Record);
+  equal(record.code, 1);
+  equal(record.values.length, 2);
+  equal(record.values[0], 3);
+  equal(record.values[1], 4);
+});
+
+test('abbrev', function() {
+  var data = '';
+  data += '10000000 1100';  // <block id = 1>, <code length = 3>
+  data += '(00000000000000000000)';  // align32
+  data += '10100000000000000000000000000000';  // <num words = 5>
+
+  data += '010 01000';  // DEFINE_ABBREV, <num abbrevs ops = 2>
+  data += '1 01101000';  // LITERAL, <value = 22>
+  data += '0110 0100 00100';  // ARRAY, FIXED, 4-bits
+
+  data += '001 110000 1010 0110 1110';  // abbrev 4, <values 5, 6, 7>
+  data += '001 001000 1000 0110 0010 0001';  // abbrev 4, <values 1, 6, 4, 8>
+
+  data += '00 (000000000000000000)';  // END_BLOCK, align32
+
+  var bs = BSbits(data);
+  var block = new Block();
+  var context = new BlockInfoContext();
+  block.read(bs, context);
+
+  equal(block.id, 1, 'block.id');
+  equal(block.chunks.length, 2, 'block.chunks.length');
+
+  ok(block.chunks[0] instanceof Record, 'chunk is Record');
+  equal(block.chunks[0].code, 22, 'chunk.code');
+  equal(block.chunks[0].values.length, 3, 'chunk.values.length');
+  equal(block.chunks[0].values[0], 5);
+  equal(block.chunks[0].values[1], 6);
+  equal(block.chunks[0].values[2], 7);
+
+  ok(block.chunks[1] instanceof Record, 'chunk is Record');
+  equal(block.chunks[1].code, 22, 'chunk.code');
+  equal(block.chunks[1].values.length, 4, 'chunk.values.length');
+  equal(block.chunks[1].values[0], 1);
+  equal(block.chunks[1].values[1], 6);
+  equal(block.chunks[1].values[2], 4);
+  equal(block.chunks[1].values[3], 8);
+});
+
+test('info abbrev', function() {
+  var data = '';
+  data += '00000000 0100';  // <block id = 0>, <code length = 2>
+  data += '(00000000000000000000)';  // align32
+  data += '00000000000000000000000000000000';  // <num words>
+
+  // UNABBREV_RECORD, SETBID, <num values = 1>, <value = 20>
+  data += '11 100000 100000 001010';
+  data += '01 01000';  // DEFINE_ABBREV, <num abbrevs = 1>
+  data += '0110 0100 00100';  // ARRAY, FIXED, 4-bits
+
+  // subblock
+  data += '10';  // SUBBLOCK
+  data += '00101000 1100';  // <block id = 20>, <code length = 3>
+  data += '(0000000000)';  // align32
+  data += '00000000000000000000000000000000';  // <num words>
+  data += '001 110000 1010 0110 1110';  // abbrev 4, <values 5, 6, 7>
+  data += '000 (00000000)';  // END_BLOCK, align32
+  // end subblock
+
+  data += '00 (000000000000000000000000000000)';  // END_BLOCK, align32
+
+  var bs = BSbits(data);
+  var block = new Block();
+  var context = new BlockInfoContext();
+  block.read(bs, context);
+
+  equal(block.id, 0, 'block.id');
+  equal(block.chunks.length, 2, 'block.chunks.length');
+
+  var subblock = block.chunks[1];
+  ok(subblock instanceof Block, 'chunk #2 is Block');
+  equal(subblock.id, 20, 'subblock.id');
+  equal(subblock.chunks.length, 1, 'subblock.chunks.length');
+
+  ok(subblock.chunks[0] instanceof Record, 'subblock chunk is Record');
+  equal(subblock.chunks[0].values.length, 2);
+  equal(subblock.chunks[0].code, 5);
+  equal(subblock.chunks[0].values[0], 6);
+  equal(subblock.chunks[0].values[1], 7);
 });
