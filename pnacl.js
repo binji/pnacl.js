@@ -38,7 +38,7 @@ BitStream.prototype._readFracBits = function(numBits) {
     this.curword = 0;
   } else {
     result = this.curword & ((1 << numBits) - 1);
-    this.curword >>= numBits;
+    this.curword >>>= numBits;
   }
   this.curwordBits -= numBits;
   this.bitOffset += numBits;
@@ -46,13 +46,13 @@ BitStream.prototype._readFracBits = function(numBits) {
 };
 
 BitStream.prototype._fillCurWord = function() {
-  var byteOffset = this.bitOffset >> 3;
+  var byteOffset = this.bitOffset >>> 3;
   if (byteOffset >= this.byteLength) {
     var msg = '_fillCurWord: out of range. byteOffset =' +
         byteOffset + ' max =' + this.byteLength;
     throw new Error(msg);
   }
-  var u32offset = byteOffset >> 2;
+  var u32offset = byteOffset >>> 2;
   this.curword = this.dataView[u32offset];
   if (byteOffset + 4 < this.byteLength)
     this.curwordBits = 32;
@@ -123,7 +123,7 @@ BitStream.prototype.align32 = function() {
 };
 
 BitStream.prototype.atEnd = function() {
-  var byteOffset = this.bitOffset >> 3;
+  var byteOffset = this.bitOffset >>> 3;
   return byteOffset === this.byteLength;
 };
 
