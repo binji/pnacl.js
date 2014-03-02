@@ -287,7 +287,7 @@ function Char6AbbrevOp() {}
 Char6AbbrevOp.prototype = new AbbrevOp();
 
 Char6AbbrevOp.prototype.readAbbrev = function(bs) {
-  return CHAR6.charCodeAt(bs.read(6));
+  return [CHAR6.charCodeAt(bs.read(6))];
 };
 
 function BlobAbbrevOp() {}
@@ -395,8 +395,10 @@ Record.prototype.read = function(bs, abbrevId, abbrevs) {
   } else {
     var self = this;
     var abbrev = abbrevs[abbrevId - 4];  // -4 to skip abbrev defaults.
-    if (abbrev === undefined)
-      throw new Error('Invalid abbrev: ' + abbrevId);
+    if (abbrev === undefined) {
+      var msg = 'Invalid abbrev: ' + abbrevId + ' max = ' + abbrevs.length;
+      throw new Error(msg);
+    }
     abbrev.ops.forEach(function(op) {
       op.readAbbrev(bs).forEach(function(value) {
         self.values.push(value);

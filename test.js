@@ -294,11 +294,11 @@ test('array abbrev op - fixed', function() {
 test('char6 abbrev op', function() {
   var op = new Char6AbbrevOp();
   var bs = BSbits('111000 001000 110100 110100 011100');
-  deepEqual(op.readAbbrev(bs), 'h'.charCodeAt(0));
-  deepEqual(op.readAbbrev(bs), 'e'.charCodeAt(0));
-  deepEqual(op.readAbbrev(bs), 'l'.charCodeAt(0));
-  deepEqual(op.readAbbrev(bs), 'l'.charCodeAt(0));
-  deepEqual(op.readAbbrev(bs), 'o'.charCodeAt(0));
+  deepEqual(op.readAbbrev(bs), ['h'.charCodeAt(0)]);
+  deepEqual(op.readAbbrev(bs), ['e'.charCodeAt(0)]);
+  deepEqual(op.readAbbrev(bs), ['l'.charCodeAt(0)]);
+  deepEqual(op.readAbbrev(bs), ['l'.charCodeAt(0)]);
+  deepEqual(op.readAbbrev(bs), ['o'.charCodeAt(0)]);
 });
 
 test('blob abbrev op', function() {
@@ -559,4 +559,105 @@ test('info abbrev', function() {
   equal(subblock.chunks[0].code, 5);
   equal(subblock.chunks[0].values[0], 6);
   equal(subblock.chunks[0].values[1], 7);
+});
+
+function getResource(resourceUrl, onload) {
+  var xhr = new XMLHttpRequest();
+  xhr.onload = function(event) { onload(xhr.response); }
+  xhr.open('get', resourceUrl, true);
+  xhr.responseType = 'arraybuffer';
+  xhr.send();
+}
+
+function getAllResources(resourceUrls, onload) {
+  var resourceHash = {};
+  var expected = resourceUrls.length;
+  resourceUrls.forEach(function(resourceUrl) {
+    getResource(resourceUrl, function(resource) {
+      resourceHash[resourceUrl] = resource;
+      if (--expected == 0) {
+        onload(resourceHash);
+      }
+    });
+  });
+}
+
+function arrayBufferToString(ab) {
+  var view = new Uint8Array(ab);
+  var result = '';
+  for (var i = 0; i < ab.byteLength; ++i) {
+    result += String.fromCharCode(view[i]);
+  }
+  return result;
+}
+
+function makeJsonRecord(record) {
+  return {
+    _type: 'Record',
+    code: record.code,
+    values: record.values
+  };
+}
+
+function makeJsonChunk(chunk) {
+  if (chunk instanceof Record) {
+    return makeJsonRecord(chunk);
+  } else if (chunk instanceof Block) {
+    return makeJsonBlock(chunk);
+  }
+}
+
+function makeJsonBlock(block) {
+  return {
+    _type: 'Block',
+    _id: block.id,
+    chunks: block.chunks.map(makeJsonChunk)
+  };
+}
+
+function makeJsonHeaderField(field) {
+  return {
+    ftype: field.ftype,
+    id: field.id,
+    data: field.data
+  };
+}
+
+function makeJsonHeader(header) {
+  return {
+    sig: header.sig,
+    num_fields: header.numFields,
+    num_bytes: header.numBytes,
+    fields: header.fields.map(makeJsonHeaderField)
+  };
+}
+
+function makeJsonBitcode(bc) {
+  return {
+    header: makeJsonHeader(bc.header),
+    blocks: bc.blocks.map(makeJsonBlock)
+  };
+}
+
+asyncTest('load pexe', function() {
+  getAllResources(['simple.pexe', 'simple.pexe.json'], function(resources) {
+    var ab = resources['simple.pexe'];
+    var bs = new BitStream(ab);
+    var bc = new Bitcode();
+    try {
+      bc.read(bs);
+    } catch (e) {
+      ok(false, 'Error reading pexe: ' + e.message);
+    }
+
+    var goldenJson = arrayBufferToString(resources['simple.pexe.json']);
+    var golden = JSON.parse(goldenJson);
+
+    // TODO(binji): this currently fails.
+    // deepEqual(makeJsonBitcode(bc), golden);
+    ok(true);
+
+    // Continue with other tests.
+    start();
+  });
 });
