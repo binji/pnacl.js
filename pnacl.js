@@ -3,10 +3,6 @@
 // found in the LICENSE file.
 "use strict";
 
-function Error(msg) {
-  this.message = msg;
-}
-
 function resizeArrayBuffer(ab, newLen) {
   var abView = new Uint8Array(ab);
   var newAb = new ArrayBuffer(newLen);
@@ -42,14 +38,14 @@ BitStream.prototype._readFracBits = function(numBits) {
   }
   this.curwordBits -= numBits;
   this.bitOffset += numBits;
-  return result;
+  return result >>> 0;  // Force unsigned.
 };
 
 BitStream.prototype._fillCurWord = function() {
   var byteOffset = this.bitOffset >>> 3;
   if (byteOffset >= this.byteLength) {
-    var msg = '_fillCurWord: out of range. byteOffset =' +
-        byteOffset + ' max =' + this.byteLength;
+    var msg = '_fillCurWord: out of range. byteOffset = ' +
+        byteOffset + ' max = ' + this.byteLength;
     throw new Error(msg);
   }
   var u32offset = byteOffset >>> 2;
@@ -61,6 +57,7 @@ BitStream.prototype._fillCurWord = function() {
 };
 
 BitStream.prototype.read = function(numBits) {
+  // assert(numBits <= 32);
   if (numBits <= this.curwordBits)
     return this._readFracBits(numBits);
 
@@ -70,24 +67,69 @@ BitStream.prototype.read = function(numBits) {
   this.bitOffset += bits_read;
   this._fillCurWord();
   result |= this._readFracBits(bits_left) << bits_read;
-  return result;
+  return result >>> 0;  // Force unsigned.
 };
 
-BitStream.prototype.readVbr = function(numBits) {
+BitStream.prototype.readVbr32 = function(numBits) {
+  // assert(numBits <= 32);
   var piece = this.read(numBits);
   var hiMask = 1 << (numBits - 1);
   if ((piece & hiMask) === 0)
     return piece;
 
   var loMask = hiMask - 1;
+  var restMask = 0xffffffff;
   var result = 0;
   var shift = 0;
   while (1) {
+    if ((piece & restMask) !== piece)
+      throw new Error('readVbr32: value is larger than 32-bits.');
+
     result |= (piece & loMask) << shift;
     if ((piece & hiMask) === 0)
-      return result;
+      return result >>> 0;  // Force unsigned.
     shift += numBits - 1;
     piece = this.read(numBits);
+    restMask >>>= numBits - 1;
+  }
+};
+
+BitStream.prototype._readVbr64Continue = function(numBits, piece, result,
+                                                  shift) {
+  var hiMask = U64.ONE.shiftLeft(numBits - 1);
+  var loMask = hiMask.subtract(U64.ONE);
+  piece = U64.fromInt(piece);
+  result = U64.fromInt(result);
+  while (1) {
+    result = result.or(piece.and(loMask).shiftLeft(shift));
+    if (piece.and(hiMask).isZero())
+      return result;
+    shift += numBits - 1;
+    piece = U64.fromNumber(this.read(numBits));
+  }
+};
+
+BitStream.prototype.readVbr = function(numBits) {
+  // assert(numBits <= 32);
+  var piece = this.read(numBits);
+  var hiMask = 1 << (numBits - 1);
+  if ((piece & hiMask) === 0)
+    return piece;
+
+  var restMask = 0xffffffff;
+  var loMask = hiMask - 1;
+  var result = 0;
+  var shift = 0;
+  while (1) {
+    if ((piece & restMask) !== piece)
+      return this._readVbr64Continue(numBits, piece, result, shift);
+
+    result |= (piece & loMask) << shift;
+    if ((piece & hiMask) === 0)
+      return result >>> 0;  // Force unsigned.
+    shift += numBits - 1;
+    piece = this.read(numBits);
+    restMask >>>= numBits - 1;
   }
 };
 
@@ -220,6 +262,7 @@ function LiteralAbbrevOp(value) {
 }
 
 LiteralAbbrevOp.prototype = new AbbrevOp();
+LiteralAbbrevOp.prototype.constructor = LiteralAbbrevOp;
 
 LiteralAbbrevOp.prototype.read = function(bs) {
   this.value = bs.readVbr(8);
@@ -234,9 +277,10 @@ function FixedAbbrevOp(numBits) {
 }
 
 FixedAbbrevOp.prototype = new AbbrevOp();
+FixedAbbrevOp.prototype.constructor = FixedAbbrevOp;
 
 FixedAbbrevOp.prototype.read = function(bs) {
-  this.numBits = bs.readVbr(5);
+  this.numBits = bs.readVbr32(5);
 };
 
 FixedAbbrevOp.prototype.readAbbrev = function(bs) {
@@ -248,9 +292,10 @@ function VbrAbbrevOp(numBits) {
 }
 
 VbrAbbrevOp.prototype = new AbbrevOp();
+VbrAbbrevOp.prototype.constructor = VbrAbbrevOp;
 
 VbrAbbrevOp.prototype.read = function(bs) {
-  this.numBits = bs.readVbr(5);
+  this.numBits = bs.readVbr32(5);
 };
 
 VbrAbbrevOp.prototype.readAbbrev = function(bs) {
@@ -264,13 +309,14 @@ function ArrayAbbrevOp(eltOp) {
 }
 
 ArrayAbbrevOp.prototype = new AbbrevOp();
+ArrayAbbrevOp.prototype.constructor = ArrayAbbrevOp;
 
 ArrayAbbrevOp.prototype.read = function(bs) {
   this.eltOp = readAbbrevOp(bs);
 };
 
 ArrayAbbrevOp.prototype.readAbbrev = function(bs) {
-  var numElts = bs.readVbr(6);
+  var numElts = bs.readVbr32(6);
   var values = [];
   for (var i = 0; i < numElts; ++i) {
     this.eltOp.readAbbrev(bs).forEach(function(elt) {
@@ -285,6 +331,7 @@ var CHAR6 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._';
 function Char6AbbrevOp() {}
 
 Char6AbbrevOp.prototype = new AbbrevOp();
+Char6AbbrevOp.prototype.constructor = Char6AbbrevOp;
 
 Char6AbbrevOp.prototype.readAbbrev = function(bs) {
   return [CHAR6.charCodeAt(bs.read(6))];
@@ -293,6 +340,7 @@ Char6AbbrevOp.prototype.readAbbrev = function(bs) {
 function BlobAbbrevOp() {}
 
 BlobAbbrevOp.prototype = new AbbrevOp();
+BlobAbbrevOp.prototype.constructor = BlobAbbrevOp;
 
 BlobAbbrevOp.prototype.readAbbrev = function(bs) {
   var numBytes = bs.read(6);
@@ -309,7 +357,7 @@ function Abbrev() {
 }
 
 Abbrev.prototype.read = function(bs) {
-  var numOps = bs.readVbr(5);
+  var numOps = bs.readVbr32(5);
   var i = 0;
   while (i < numOps) {
     var op = readAbbrevOp(bs);
@@ -389,7 +437,7 @@ function Record() {
 Record.prototype.read = function(bs, abbrevId, abbrevs) {
   if (abbrevId === ENTRY_UNABBREV_RECORD) {
     this.code = bs.readVbr(6);
-    var numElts = bs.readVbr(6);
+    var numElts = bs.readVbr32(6);
     for (var i = 0; i < numElts; ++i)
       this.values.push(bs.readVbr(6));
   } else {
@@ -417,7 +465,7 @@ function Block() {
 
 Block.prototype.read = function(bs, context) {
   this.id = bs.readVbr(8);
-  var codelen = bs.readVbr(4);
+  var codelen = bs.readVbr32(4);
   bs.align32();
   var numWords = bs.read(32);
 

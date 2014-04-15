@@ -141,14 +141,36 @@ test('read vbr', function() {
   // 001 | 001 | 100
   // 00    00    1
   // 00001
-  equal(bs.readVbr(3), bin('00001'));
+  equal(bs.readVbr32(3), bin('00001'));
   equal(bs.tellBit(), 9);
   // 1101 | 0011 | 1000
   // 110    001    1
   // 1100011
-  equal(bs.readVbr(4), bin('1100011'));
+  equal(bs.readVbr32(4), bin('1100011'));
   equal(bs.tellBit(), 21);
   ok(!bs.atEnd());
+});
+
+test('read vbr - 32-bit unsigned', function() {
+  var bs = BSbits('110111|011111|111111|111111|111111|111111|110000');
+  // 000|11111111|11111111|11111111|11011011
+  // 0x0FFFFFFDB
+  equal(bs.readVbr32(6), 0xffffffdb);
+});
+
+test('read vbr - 64-bit', function() {
+  var bs = BSbits('111111|111111|111111|111111|111111|111111|111000');
+  // 001|11111111|11111111|11111111|11111111
+  // 0x1ffffffff
+  deepEqual(bs.readVbr(6), U64.fromNumber(0x1ffffffff));
+
+  // 0xffffffff
+  var bs = BSbits('111111|111111|111111|111111|111111|111111|110000');
+  equal(bs.readVbr(6), 0xffffffff);
+
+  // 300 = 256 + 32 + 8 + 4
+  var bs = BSbits('001101|1001');
+  equal(bs.readVbr(6), 300);
 });
 
 test('seek bit', function() {
@@ -323,6 +345,16 @@ test('read abbrev op - literal', function() {
   deepEqual(op.readAbbrev(dummyBs), [85]);
 });
 
+test('read abbrev op - literal 64-bit', function() {
+  // 1000|0001|0000|0010|0000|0100|0000|1000|0001
+  // 0x810204081
+  var bs = BSbits('1 10000001|10000001|10000001|10000001|10000001|10000000');
+  var op = readAbbrevOp(bs);
+  ok(op instanceof LiteralAbbrevOp);
+  var dummyBs = BS([]);
+  deepEqual(op.readAbbrev(dummyBs), [U64.fromNumber(0x810204081)]);
+});
+
 test('read abbrev op - fixed', function() {
   // 0100 = fixed, followed by 5 bits for the fixed bit length.
   var bs1 = BSbits('0100 11000');
@@ -339,6 +371,16 @@ test('read abbrev op - vbr', function() {
   ok(op instanceof VbrAbbrevOp);
   var bs2 = BSbits('111 100');
   deepEqual(op.readAbbrev(bs2), [7]);
+});
+
+test('read abbrev op - vbr 64-bit', function() {
+  var bs1 = BSbits('0010 00010');
+  var op = readAbbrevOp(bs1);
+  ok(op instanceof VbrAbbrevOp);
+  // 000|0111|1000|1111|0001|1110|0011|1100|0111|1000|1111
+  // 0x78f1e3c78f
+  var bs2 = BSbits('11110001|11110001|11110001|11110001|11110001|11110000');
+  deepEqual(op.readAbbrev(bs2), [U64.fromNumber(0x78f1e3c78f)]);
 });
 
 test('read abbrev op - array', function() {
@@ -391,6 +433,25 @@ test('unabbrev', function() {
   equal(record.values[0], 10);
   equal(record.values[1], 20);
 });
+
+test('unabbrev 64-bit', function() {
+  var data = '';
+  data += '011010 010000';  // <code = 22>, <num values = 2>
+  // <values = 0x100000000, 1>
+  data += '000001|000001|000001|000001|000001|000001|001000 100000';
+  var bs = BSbits(data);
+
+  var record = new Record();
+  var abbrevId = 3;  // UNABBREV_RECORD
+  var abbrevs = [];  // not needed
+  record.read(bs, abbrevId, abbrevs);
+
+  equal(record.code, 22);
+  equal(record.values.length, 2);
+  deepEqual(record.values[0], U64.fromNumber(0x100000000));
+  equal(record.values[1], 1);
+});
+
 
 test('abbrev', function() {
   var data = '010000 01010 00101';  // <num elts = 2>, <values = 10, 20>
@@ -575,7 +636,7 @@ function getAllResources(resourceUrls, onload) {
   resourceUrls.forEach(function(resourceUrl) {
     getResource(resourceUrl, function(resource) {
       resourceHash[resourceUrl] = resource;
-      if (--expected == 0) {
+      if (--expected === 0) {
         onload(resourceHash);
       }
     });
@@ -591,52 +652,52 @@ function arrayBufferToString(ab) {
   return result;
 }
 
-function makeJsonRecord(record) {
-  return {
-    _type: 'Record',
-    code: record.code,
-    values: record.values
-  };
-}
-
-function makeJsonChunk(chunk) {
-  if (chunk instanceof Record) {
-    return makeJsonRecord(chunk);
-  } else if (chunk instanceof Block) {
-    return makeJsonBlock(chunk);
-  }
-}
-
-function makeJsonBlock(block) {
-  return {
-    _type: 'Block',
-    _id: block.id,
-    chunks: block.chunks.map(makeJsonChunk)
-  };
-}
-
-function makeJsonHeaderField(field) {
-  return {
-    ftype: field.ftype,
-    id: field.id,
-    data: field.data
-  };
-}
-
-function makeJsonHeader(header) {
-  return {
-    sig: header.sig,
-    num_fields: header.numFields,
-    num_bytes: header.numBytes,
-    fields: header.fields.map(makeJsonHeaderField)
-  };
-}
-
 function makeJsonBitcode(bc) {
   return {
     header: makeJsonHeader(bc.header),
     blocks: bc.blocks.map(makeJsonBlock)
   };
+
+  function makeJsonHeader(header) {
+    return {
+      sig: header.sig,
+      num_fields: header.numFields,
+      num_bytes: header.numBytes,
+      fields: header.fields.map(makeJsonHeaderField)
+    };
+  }
+
+  function makeJsonHeaderField(field) {
+    return {
+      ftype: field.ftype,
+      id: field.id,
+      data: field.data
+    };
+  }
+
+  function makeJsonBlock(block) {
+    return {
+      _type: 'Block',
+      _id: block.id,
+      chunks: block.chunks.map(makeJsonChunk)
+    };
+  }
+
+  function makeJsonChunk(chunk) {
+    if (chunk instanceof Record) {
+      return makeJsonRecord(chunk);
+    } else if (chunk instanceof Block) {
+      return makeJsonBlock(chunk);
+    }
+  }
+
+  function makeJsonRecord(record) {
+    return {
+      _type: 'Record',
+      code: record.code,
+      values: record.values
+    };
+  }
 }
 
 asyncTest('load pexe', function() {
@@ -653,9 +714,7 @@ asyncTest('load pexe', function() {
     var goldenJson = arrayBufferToString(resources['simple.pexe.json']);
     var golden = JSON.parse(goldenJson);
 
-    // TODO(binji): this currently fails.
-    // deepEqual(makeJsonBitcode(bc), golden);
-    ok(true);
+    deepEqual(makeJsonBitcode(bc), golden);
 
     // Continue with other tests.
     start();
